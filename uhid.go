@@ -96,6 +96,10 @@ const (
 	StatusNoEvent
 )
 
+// RNumType is the type used for the rnum field in get report
+// requests.
+type RNumType uint8
+
 // GetReportRequest replicates the C struct found here:
 // https://source.chromium.org/chromiumos/chromiumos/codesearch/+/master:src/third_party/kernel/v4.4/include/uapi/linux/uhid.h;l=86
 // It is used to read GetReport requests written by the kernel and
@@ -103,7 +107,7 @@ const (
 type GetReportRequest struct {
 	RequestType uint32
 	ID          uint32
-	RNum        uint8
+	RNum        RNumType
 	RType       uint8
 }
 
