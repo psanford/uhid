@@ -25,7 +25,7 @@ func NewDeviceFromRecording(ctx context.Context, file *os.File) (*Device, error)
 	scanner := bufio.NewScanner(file)
 	var line string
 	// The protocol used in hid recording files can be found here:
-	// https://github.com/bentiss/hid-replay/blob/master/src/hid-replay.txt#L49
+	// https://github.com/bentiss/hid-replay/blob/6d83e4883763b55ac809e3ad6c08926e8d1aea72/src/hid-replay.txt#L49
 	i := 1
 	for ; scanner.Scan(); line, i = scanner.Text(), i+1 {
 		if len(line) == 0 || strings.HasPrefix(line, "#") || strings.HasPrefix(line, "E: ") {

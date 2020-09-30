@@ -20,16 +20,14 @@ import (
 )
 
 const (
-	// hidMaxDescriptorSize defined here:
-	// https://source.chromium.org/chromiumos/chromiumos/codesearch/+/master:src/third_party/kernel/v4.4/include/uapi/linux/uhid.h;l=67?q=uhid.h&ss=chromiumos
 	// hidMaxDescriptorSize represents the maximum length of a
-	// descriptor or an event injected.
+	// descriptor or an event injected. It matches UHID_DATA_MAX
+	// from uhid.h.
 	hidMaxDescriptorSize = 4096
 
-	// uhidEventSize refers to the size of this C struct:
-	// https://source.chromium.org/chromiumos/chromiumos/codesearch/+/master:src/third_party/kernel/v4.4/include/uapi/linux/uhid.h;l=179?q=uhid.h&ss=chromiumos
-	// This is the struct that is always written by the kernel to
-	// /dev/uhid.
+	// uhidEventSize refers to the size of struct uhid_event from
+	// uhid.h. This is the struct that is always written by the
+	// kernel to /dev/uhid.
 	uhidEventSize = 4380
 )
 
@@ -38,8 +36,7 @@ const (
 type EventType uint32
 
 const (
-	// the following constants defined here:
-	// https://source.chromium.org/chromiumos/chromiumos/codesearch/+/master:src/third_party/kernel/v4.4/include/uapi/linux/uhid.h;l=26?q=uhid.h&ss=chromiumos
+	// The following constants are from enum uhid_event_type in uhid.h.
 	// These constants are used for event handlers. If the user wishes
 	// to handle an event UHIDEvent for a device d  using the handler
 	// function handlerFunction then the corresponding handler must be
@@ -100,8 +97,7 @@ const (
 // requests.
 type RNumType uint8
 
-// GetReportRequest replicates the C struct found here:
-// https://source.chromium.org/chromiumos/chromiumos/codesearch/+/master:src/third_party/kernel/v4.4/include/uapi/linux/uhid.h;l=86
+// GetReportRequest replicates struct uhid_get_report_req in uhid.h.
 // It is used to read GetReport requests written by the kernel and
 // handling them afterwards if necessary.
 type GetReportRequest struct {
@@ -111,9 +107,8 @@ type GetReportRequest struct {
 	RType       uint8
 }
 
-// GetReportReplyRequest replicates the C struct found here:
-// https://source.chromium.org/chromiumos/chromiumos/codesearch/+/master:src/third_party/kernel/v4.4/include/uapi/linux/uhid.h;l=92
-// It should be written to Device.File in response to a
+// GetReportReplyRequest replicates struct uhid_get_report_reply_req
+// in uhid.h. It should be written to Device.File in response to a
 // GetReportRequest by the kernel.
 type GetReportReplyRequest struct {
 	RequestType uint32
@@ -123,8 +118,7 @@ type GetReportReplyRequest struct {
 	Data        [hidMaxDescriptorSize]byte
 }
 
-// uhidCreate2Request replicates the C struct found here:
-// https://cs.corp.google.com/chromeos_public/src/third_party/kernel/v4.14/include/uapi/linux/uhid.h?pv=1&l=45
+// uhidCreate2Request replicates struct uhid_create2_req in uhid.h.
 // Create requests are written into /dev/uhid in order to create a
 // virtual HID device. This device will have the given name and IDs as
 // well as respond to the given HID descriptor.
@@ -144,9 +138,8 @@ type uhidCreate2Request struct {
 
 // DeviceData encapsulates the non-trivial data that will then be
 // copied over to a create request or be used to get information from
-// the device. The fixed size byte arrays are meant to replicate this
-// struct:
-// https://cs.corp.google.com/chromeos_public/src/third_party/kernel/v4.14/include/uapi/linux/uhid.h?pv=1&l=45
+// the device. The fixed size byte arrays are meant to replicate those
+// in struct uhid_create2_req in uhid.h.
 type DeviceData struct {
 	name       [128]byte
 	phys       [64]byte
@@ -175,9 +168,8 @@ type Device struct {
 	EventHandlers map[uint32]eventHandler
 }
 
-// Input2Request replicates the C struct found here:
-// https://cs.corp.google.com/chromeos_public/src/third_party/kernel/v4.14/include/uapi/linux/uhid.h?pv=1&l=45
-// an input request is used to inject events into the created device.
+// Input2Request replicates struct uhid_input2_req in uhid.h.
+// An input request is used to inject events into the created device.
 type Input2Request struct {
 	RequestType uint32
 	DataSize    uint16
@@ -290,9 +282,8 @@ func (d *Device) EventNodes(ctx context.Context) ([]string, error) {
 
 // readEvent returns a buffer with information read from the given
 // device's file. All events arriving to /dev/uhid will be of the
-// form of this struct:
-// https://cs.corp.google.com/chromeos_public/src/third_party/kernel/v4.14/include/uapi/linux/uhid.h?pv=1&l=180
-// which has a size of uhidEventSize.
+// form of struct uhid_event from uhid.h, which has a size of
+// uhidEventSize.
 func (d *Device) readEvent() ([]byte, error) {
 	if d.file == nil {
 		return nil, errors.New("device has not been initialized")
