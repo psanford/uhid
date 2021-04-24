@@ -10,13 +10,12 @@ import (
 	"bytes"
 	"context"
 	"encoding/binary"
+	"errors"
 	"fmt"
 	"os"
 	"time"
 
 	"github.com/google/uuid"
-
-	"chromiumos/tast/errors"
 )
 
 const (
@@ -179,10 +178,10 @@ type Input2Request struct {
 // NewDevice returns a device with the given name and descriptor.
 func NewDevice(name, descriptor string) (*Device, error) {
 	if len(name) > 128 {
-		return nil, errors.Errorf("device name too long: got %d want %d or shorter", len(name), 128)
+		return nil, fmt.Errorf("device name too long: got %d want %d or shorter", len(name), 128)
 	}
 	if len(descriptor) > hidMaxDescriptorSize {
-		return nil, errors.Errorf("device descriptor too long: got %d want %d or shorter", len(descriptor), hidMaxDescriptorSize)
+		return nil, fmt.Errorf("device descriptor too long: got %d want %d or shorter", len(descriptor), hidMaxDescriptorSize)
 	}
 	d := Device{}
 	copy(d.Data.name[:], name)
@@ -200,7 +199,7 @@ func (d *Device) NewKernelDevice(ctx context.Context) error {
 
 	var err error
 	if d.file, err = os.OpenFile("/dev/uhid", os.O_RDWR, 0644); err != nil {
-		return errors.Wrap(err, "failed opening /dev/uhid file")
+		return fmt.Errorf("failed opening /dev/uhid file: %w", err)
 	}
 
 	// Check if uniq is empty.
@@ -210,13 +209,13 @@ func (d *Device) NewKernelDevice(ctx context.Context) error {
 	}
 
 	if err = d.WriteEvent(d.Data.createRequest()); err != nil {
-		return errors.Wrap(err, "failed writing uhid create request")
+		return fmt.Errorf("failed writing uhid create request: %w", err)
 	}
 	d.setDefaultHandlers()
 	var status ReadStatus
 	status, err = d.Dispatch(ctx)
 	if status != StatusOK || err != nil {
-		return errors.Wrap(err, "kernel failed at creating the device")
+		return fmt.Errorf("kernel failed at creating the device: %w", err)
 	}
 	return nil
 }
@@ -227,10 +226,10 @@ func (d *Device) NewKernelDevice(ctx context.Context) error {
 func (d *Device) Close() error {
 	if d.file != nil {
 		if err := d.WriteEvent(Destroy); err != nil {
-			return errors.Wrap(err, "failed writing uhid destroy request")
+			return fmt.Errorf("failed writing uhid destroy request: %w", err)
 		}
 		if err := d.file.Close(); err != nil {
-			return errors.Wrap(err, "failed closing file during device destruction")
+			return fmt.Errorf("failed closing file during device destruction: %w", err)
 		}
 	}
 	return nil
@@ -247,7 +246,7 @@ func (d *Device) InjectEvent(data []uint8) error {
 	req.DataSize = uint16(len(data))
 	copy(req.Data[:len(data)], data)
 	if err := d.WriteEvent(req); err != nil {
-		return errors.Wrap(err, "failed writing input2 request")
+		return fmt.Errorf("failed writing input2 request: %w", err)
 	}
 	return nil
 }
@@ -296,7 +295,7 @@ func (d *Device) readEvent() ([]byte, error) {
 		return buf, err
 	}
 	if n != uhidEventSize {
-		return buf, errors.Errorf("unexpected number of bytes of UHID event; got %d, want %d", n, uhidEventSize)
+		return buf, fmt.Errorf("unexpected number of bytes of UHID event; got %d, want %d", n, uhidEventSize)
 	}
 	return buf, nil
 }
@@ -342,12 +341,12 @@ func (d *Device) Dispatch(ctx context.Context) (ReadStatus, error) {
 	select {
 	case <-done:
 		if err != nil {
-			return StatusOK, errors.Wrap(err, "failed reading uhid event")
+			return StatusOK, fmt.Errorf("failed reading uhid event: %w", err)
 		}
 		reader := bytes.NewReader(buf[:4]) // We just want to read the first uint32 for now
 		var requestType uint32
 		if err = binary.Read(reader, binary.LittleEndian, &requestType); err != nil {
-			return StatusOK, errors.Wrap(err, "failed parsing uhid file data into request")
+			return StatusOK, fmt.Errorf("failed parsing uhid file data into request: %w", err)
 		}
 		return StatusOK, d.processEvent(ctx, buf, requestType)
 	case <-ctx.Done():
@@ -362,7 +361,7 @@ func (d *Device) processEvent(ctx context.Context, buf []byte, requestType uint3
 	if f := d.EventHandlers[requestType]; f != nil {
 		return f(ctx, d, buf)
 	}
-	return errors.Errorf("unknown event: %d", requestType)
+	return fmt.Errorf("unknown event: %d", requestType)
 }
 
 // setDefaultHandlers assigns to d's EventHandlers map handlers that
@@ -397,7 +396,7 @@ func (d *Device) Uniq() string {
 // SetUniq sets the uniq of this device.
 func (d *Device) SetUniq(uniq string) error {
 	if len(uniq) > 64 {
-		return errors.Errorf("device name too long: got %d want %d or shorter", len(uniq), 64)
+		return fmt.Errorf("device name too long: got %d want %d or shorter", len(uniq), 64)
 	}
 	copy(d.Data.uniq[:], uniq)
 	return nil

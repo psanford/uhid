@@ -6,6 +6,8 @@ package uhid
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"io/ioutil"
 	"os"
 	"path"
@@ -13,9 +15,6 @@ import (
 	"strconv"
 	"strings"
 	"time"
-
-	"chromiumos/tast/errors"
-	"chromiumos/tast/testing"
 )
 
 // devicePath returns the path corresponding to this device that
@@ -47,7 +46,7 @@ func devicePath(infoString string) (string, error) {
 		}
 	}
 	if devicePath == "" {
-		return "", errors.Errorf("device %s hasn't been created", infoString)
+		return "", fmt.Errorf("device %s hasn't been created", infoString)
 	}
 	return path.Join(devicesDirectory, devicePath), nil
 }
@@ -58,7 +57,7 @@ func devicePath(infoString string) (string, error) {
 func hidrawNodes(ctx context.Context, devicePath string) ([]string, error) {
 	const hidrawDir = "hidraw"
 
-	err := testing.Poll(ctx, func(ctx context.Context) error {
+	err := poll(ctx, func(ctx context.Context) error {
 		directories, err := ioutil.ReadDir(devicePath)
 		if err != nil {
 			return err
@@ -69,9 +68,9 @@ func hidrawNodes(ctx context.Context, devicePath string) ([]string, error) {
 			}
 		}
 		return errors.New("hidraw directory was not created")
-	}, &testing.PollOptions{Timeout: 10 * time.Second})
+	}, 10*time.Second)
 	if err != nil {
-		return nil, errors.Wrap(err, "failed waiting for hidraw directory")
+		return nil, fmt.Errorf("failed waiting for hidraw directory: %w", err)
 	}
 
 	devicePath = path.Join(devicePath, hidrawDir)
@@ -144,4 +143,29 @@ func eventNode(devicePath string) (string, error) {
 		}
 	}
 	return "", nil
+}
+
+func poll(parentCtx context.Context, f func(context.Context) error, timeout time.Duration) error {
+
+	ctx, cancel := context.WithTimeout(parentCtx, timeout)
+	defer cancel()
+
+	var err error
+	for {
+		select {
+		case <-ctx.Done():
+			if err == nil {
+				err = ctx.Err()
+			}
+			break
+		default:
+		}
+
+		err = f(ctx)
+		if err == nil {
+			return nil
+		}
+	}
+
+	return err
 }

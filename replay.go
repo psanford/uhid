@@ -7,14 +7,14 @@ package uhid
 import (
 	"bufio"
 	"context"
+	"errors"
+	"fmt"
+	"log"
 	"os"
 	"regexp"
 	"strconv"
 	"strings"
 	"time"
-
-	"chromiumos/tast/errors"
-	"chromiumos/tast/testing"
 )
 
 // NewDeviceFromRecording receives a file containing a hid recording recorded using
@@ -46,14 +46,14 @@ func NewDeviceFromRecording(ctx context.Context, file *os.File) (*Device, error)
 		case "I: ":
 			var err error
 			if dd.bus, dd.vendorID, dd.productID, err = parseInfo(ctx, data); err != nil {
-				return nil, errors.Wrap(err, parsingError(ctx, "invalid info in recording file", line, file.Name(), i).Error())
+				return nil, err
 			}
 		case "P: ":
 			copy(dd.phys[:], data)
 		case "R: ":
 			descriptor, err := parseArray(data)
 			if err != nil {
-				return nil, errors.Wrap(err, parsingError(ctx, "invalid descriptor in recording file", line, file.Name(), i).Error())
+				return nil, err
 			}
 			copy(dd.descriptor[:], descriptor[:])
 		default:
@@ -61,7 +61,7 @@ func NewDeviceFromRecording(ctx context.Context, file *os.File) (*Device, error)
 		}
 	}
 	if err := scanner.Err(); err != nil {
-		return nil, errors.Wrap(err, parsingError(ctx, "failure to parse", line, file.Name(), i).Error())
+		return nil, err
 	}
 	return &Device{Data: dd}, nil
 }
@@ -93,10 +93,13 @@ func (d *Device) Replay(ctx context.Context, file *os.File) error {
 			var err error
 			var nextTimestamp time.Duration
 			if nextTimestamp, err = parseTime(ctx, line); err != nil {
-				return errors.Wrap(err, parsingError(ctx, "invalid recording file", line, file.Name(), i).Error())
+				return err
 			}
-			if err := testing.Sleep(ctx, nextTimestamp-sleep); err != nil {
-				return errors.Wrap(err, "failed while sleeping during replay")
+			timer := time.NewTimer(nextTimestamp - sleep)
+			select {
+			case <-timer.C:
+			case <-ctx.Done():
+				return fmt.Errorf("failed while sleeping during replay: %w", ctx.Err())
 			}
 			sleep = nextTimestamp
 			// The timestamp always occupies 13 spaces.
@@ -111,7 +114,7 @@ func (d *Device) Replay(ctx context.Context, file *os.File) error {
 		}
 	}
 	if err := scanner.Err(); err != nil {
-		return errors.Wrapf(err, "failure to parse file (line: %d)", i)
+		return fmt.Errorf("failure to parse file (line: %d) %w", i, err)
 	}
 	return nil
 }
@@ -127,8 +130,8 @@ func parseInfo(ctx context.Context, line string) (ddBus uint16, ddVendorID, ddPr
 	regex := regexp.MustCompile(`([0-9a-f]+)\s+([0-9a-f]+)\s+([0-9a-f]+)`)
 	info := regex.FindStringSubmatch(line)
 	if len(info) == 0 {
-		testing.ContextLogf(ctx, "Regexp: %q", regex)
-		testing.ContextLogf(ctx, "String: %q", line)
+		log.Printf("Regexp: %q", regex)
+		log.Printf("String: %q", line)
 		return 0, 0, 0, errors.New("failed to parse info with regexp")
 	}
 
@@ -138,7 +141,7 @@ func parseInfo(ctx context.Context, line string) (ddBus uint16, ddVendorID, ddPr
 	for i, v := range []*uint64{&bus, &vendorID, &productID} {
 		*v, err = strconv.ParseUint(info[i], 16, 16)
 		if err != nil {
-			return 0, 0, 0, errors.Wrapf(err, "failed to parse device info item number %d", i+1)
+			return 0, 0, 0, fmt.Errorf("failed to parse device info item number %d: %w", i+1, err)
 		}
 	}
 
@@ -161,8 +164,8 @@ func parseTime(ctx context.Context, line string) (time.Duration, error) {
 	regex := regexp.MustCompile(`(\d{6})\.(\d{6})\s+.*`)
 	times := regex.FindStringSubmatch(line)
 	if len(times) == 0 {
-		testing.ContextLogf(ctx, "Regexp: %q", regex)
-		testing.ContextLogf(ctx, "String: %q", line)
+		log.Printf("Regexp: %q", regex)
+		log.Printf("String: %q", line)
 		return 0, errors.New("failed to parse timestamp with regexp")
 	}
 
@@ -172,7 +175,7 @@ func parseTime(ctx context.Context, line string) (time.Duration, error) {
 	for i, v := range []*uint64{&seconds, &microSeconds} {
 		*v, err = strconv.ParseUint(times[i], 10, 32)
 		if err != nil {
-			return 0, errors.Wrap(err, "failed parsing timestamp")
+			return 0, fmt.Errorf("failed parsing timestamp: %w", err)
 		}
 	}
 
@@ -191,17 +194,17 @@ func parseArray(line string) ([]byte, error) {
 	}
 	size, err := strconv.ParseUint(dataFields[0], 10, 16)
 	if err != nil {
-		return nil, errors.Wrap(err, "failed parsing event data array length")
+		return nil, fmt.Errorf("failed parsing event data array length: %w", err)
 	}
 	if size != uint64(len(dataFields[1:])) {
-		return nil, errors.Errorf("specified event data length does not match actual length; got %d, want %d", len(dataFields[1:]), size)
+		return nil, fmt.Errorf("specified event data length does not match actual length; got %d, want %d", len(dataFields[1:]), size)
 	}
 
 	data := make([]byte, size)
 	for i, v := range dataFields[1:] {
 		n, err := strconv.ParseUint(v, 16, 8)
 		if err != nil {
-			return nil, errors.Wrap(err, "failed parsing event data element")
+			return nil, fmt.Errorf("failed parsing event data element: %w", err)
 		}
 		data[i] = byte(n)
 	}
@@ -213,6 +216,6 @@ func parseArray(line string) ([]byte, error) {
 // caused the error and returns an error message with the given error
 // message and line number.
 func parsingError(ctx context.Context, errorMessage, line, fileName string, lineNumber int) error {
-	testing.ContextLogf(ctx, "Failed to parse line %d of %s: %q", lineNumber, fileName, line)
-	return errors.Errorf("%s (line: %d)", errorMessage, lineNumber)
+	log.Printf("Failed to parse line %d of %s: %q", lineNumber, fileName, line)
+	return fmt.Errorf("%s (line: %d)", errorMessage, lineNumber)
 }
