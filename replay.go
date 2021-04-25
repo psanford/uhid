@@ -45,7 +45,7 @@ func NewDeviceFromRecording(ctx context.Context, file *os.File) (*Device, error)
 			copy(dd.name[:], data)
 		case "I: ":
 			var err error
-			if dd.bus, dd.vendorID, dd.productID, err = parseInfo(ctx, data); err != nil {
+			if dd.Bus, dd.VendorID, dd.ProductID, err = parseInfo(ctx, data); err != nil {
 				return nil, err
 			}
 		case "P: ":

@@ -9,13 +9,11 @@ package uhid
 import (
 	"bytes"
 	"context"
+	"crypto/rand"
 	"encoding/binary"
 	"errors"
 	"fmt"
 	"os"
-	"time"
-
-	"github.com/google/uuid"
 )
 
 const (
@@ -143,13 +141,11 @@ type DeviceData struct {
 	name       [128]byte
 	phys       [64]byte
 	uniq       [64]byte
-	descriptor [hidMaxDescriptorSize]byte
-	bus        uint16
-	vendorID   uint32
-	productID  uint32
+	descriptor []byte
+	Bus        uint16
+	VendorID   uint32
+	ProductID  uint32
 }
-
-type eventHandler func(ctx context.Context, d *Device, buf []byte) error
 
 // Device is the main interface carrying all of the created (or soon
 // to be created) kernel device's information.
@@ -159,12 +155,7 @@ type Device struct {
 	eventNodes  []string
 	file        *os.File
 
-	// EventHandlers is used on a call to Dispatch to call the
-	// corresponding handling function. If the user wishes to handle a
-	// particular event then they must assign their handler function to
-	// EventHandlers[UHIDEvent] where UHIDEvent is one of the UHID
-	// constants defined above.
-	EventHandlers map[uint32]eventHandler
+	eventChan chan Event
 }
 
 // Input2Request replicates struct uhid_input2_req in uhid.h.
@@ -176,48 +167,49 @@ type Input2Request struct {
 }
 
 // NewDevice returns a device with the given name and descriptor.
-func NewDevice(name, descriptor string) (*Device, error) {
+func NewDevice(name string, descriptor []byte) (*Device, error) {
 	if len(name) > 128 {
 		return nil, fmt.Errorf("device name too long: got %d want %d or shorter", len(name), 128)
 	}
 	if len(descriptor) > hidMaxDescriptorSize {
 		return nil, fmt.Errorf("device descriptor too long: got %d want %d or shorter", len(descriptor), hidMaxDescriptorSize)
 	}
-	d := Device{}
+	d := Device{
+		eventChan: make(chan Event),
+	}
 	copy(d.Data.name[:], name)
-	copy(d.Data.descriptor[:], descriptor)
+	d.Data.descriptor = append(d.Data.descriptor, descriptor...)
 	return &d, nil
 }
 
-// NewKernelDevice creates a device with the attributes specified in
+// Open creates a device with the attributes specified in
 // d. Only after calling this function will the device be ready for
 // the other operations.
-func (d *Device) NewKernelDevice(ctx context.Context) error {
-	if d.Data.name == [128]byte{} || d.Data.descriptor == [hidMaxDescriptorSize]byte{} {
-		return errors.New("device has not been initialized")
+func (d *Device) Open(ctx context.Context) (chan Event, error) {
+	if d.Data.name == [128]byte{} || len(d.Data.descriptor) == 0 {
+		return nil, errors.New("device has not been initialized")
 	}
 
 	var err error
 	if d.file, err = os.OpenFile("/dev/uhid", os.O_RDWR, 0644); err != nil {
-		return fmt.Errorf("failed opening /dev/uhid file: %w", err)
+		return nil, fmt.Errorf("failed opening /dev/uhid file: %w", err)
 	}
 
 	// Check if uniq is empty.
 	if d.Data.uniq == [64]byte{} {
-		uniq, _ := uuid.NewRandom()
-		copy(d.Data.uniq[:], uniq[:])
+		rand.Read(d.Data.uniq[:])
 	}
 
 	if err = d.WriteEvent(d.Data.createRequest()); err != nil {
-		return fmt.Errorf("failed writing uhid create request: %w", err)
+		return nil, fmt.Errorf("failed writing uhid create request: %w", err)
 	}
-	d.setDefaultHandlers()
-	var status ReadStatus
-	status, err = d.Dispatch(ctx)
-	if status != StatusOK || err != nil {
-		return fmt.Errorf("kernel failed at creating the device: %w", err)
+
+	go d.dispatch(ctx)
+	evt := <-d.eventChan
+	if evt.Err != nil {
+		return nil, fmt.Errorf("kernel failed at creating the device: %w", evt.Err)
 	}
-	return nil
+	return d.eventChan, nil
 }
 
 // Close destroys the device specified in d by writing a destroy
@@ -289,7 +281,6 @@ func (d *Device) readEvent() ([]byte, error) {
 	}
 
 	buf := make([]byte, uhidEventSize)
-	// Calls to file.Read block, this should be fixed.
 	n, err := d.file.Read(buf)
 	if err != nil {
 		return buf, err
@@ -318,64 +309,59 @@ func (d *Device) WriteEvent(i interface{}) error {
 	return nil
 }
 
-// Dispatch must be called when an event needs to be handled. Be sure
+// dispatch must be called when an event needs to be handled. Be sure
 // to implement some method of checking if the event you wish to
 // handle was indeed the one handled.
-func (d *Device) Dispatch(ctx context.Context) (ReadStatus, error) {
-	if d.file == nil {
-		return StatusOK, errors.New("device has not been initialized")
-	}
-
-	ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
+func (d *Device) dispatch(parentCtx context.Context) {
+	ctx, cancel := context.WithCancel(parentCtx)
 	defer cancel()
 
-	done := make(chan struct{})
-	var buf []byte
-	var err error
+	rawDataChan := make(chan []byte)
+	errChan := make(chan error, 1)
 
 	go func() {
-		buf, err = d.readEvent()
-		close(done)
+		for {
+			buf, err := d.readEvent()
+			if err != nil {
+				errChan <- err
+				return
+			}
+			select {
+			case rawDataChan <- buf:
+			case <-ctx.Done():
+				return
+			}
+		}
 	}()
 
 	select {
-	case <-done:
-		if err != nil {
-			return StatusOK, fmt.Errorf("failed reading uhid event: %w", err)
-		}
+	case buf := <-rawDataChan:
 		reader := bytes.NewReader(buf[:4]) // We just want to read the first uint32 for now
-		var requestType uint32
-		if err = binary.Read(reader, binary.LittleEndian, &requestType); err != nil {
-			return StatusOK, fmt.Errorf("failed parsing uhid file data into request: %w", err)
+		var eventType uint32
+		if err := binary.Read(reader, binary.LittleEndian, &eventType); err != nil {
+
+			d.eventChan <- Event{
+				Err: fmt.Errorf("failed parsing uhid file data into request: %w", err),
+			}
+			return
 		}
-		return StatusOK, d.processEvent(ctx, buf, requestType)
+
+		d.eventChan <- Event{
+			Type: EventType(eventType),
+			Data: buf,
+		}
 	case <-ctx.Done():
-		return StatusNoEvent, nil
+		d.eventChan <- Event{
+			Err: ctx.Err(),
+		}
+		return
 	}
 }
 
-// processEvent selects the correct function to handle the request
-// sent by the kernel and runs it. It will return an error if the
-// event us unrecognized.
-func (d *Device) processEvent(ctx context.Context, buf []byte, requestType uint32) error {
-	if f := d.EventHandlers[requestType]; f != nil {
-		return f(ctx, d, buf)
-	}
-	return fmt.Errorf("unknown event: %d", requestType)
-}
-
-// setDefaultHandlers assigns to d's EventHandlers map handlers that
-// simply ignore the given event.
-func (d *Device) setDefaultHandlers() {
-	d.EventHandlers = map[uint32]eventHandler{
-		Start:     defaultHandler,
-		Stop:      defaultHandler,
-		Open:      defaultHandler,
-		Close:     defaultHandler,
-		Output:    defaultHandler,
-		GetReport: defaultHandler,
-		SetReport: defaultHandler,
-	}
+type Event struct {
+	Type EventType
+	Err  error
+	Data []byte
 }
 
 // Name returns the name of the device.
@@ -404,40 +390,38 @@ func (d *Device) SetUniq(uniq string) error {
 
 // Bus returns the bus of this device.
 func (d *Device) Bus() uint16 {
-	return d.Data.bus
+	return d.Data.Bus
 }
 
 // VendorID returns the vendor id of this device.
 func (d *Device) VendorID() uint32 {
-	return d.Data.vendorID
+	return d.Data.VendorID
 }
 
 // ProductID returns the product id of this device.
 func (d *Device) ProductID() uint32 {
-	return d.Data.productID
+	return d.Data.ProductID
 }
 
 // createRequest returns a new uhidCreate2Request based on the data
 // contained in deviceData.
 func (dd *DeviceData) createRequest() uhidCreate2Request {
-	return uhidCreate2Request{
+	req := uhidCreate2Request{
 		requestType:    Create2,
 		name:           dd.name,
 		phys:           dd.phys,
 		uniq:           dd.uniq,
 		descriptorSize: uint16(len(dd.descriptor)),
-		bus:            dd.bus,
-		vendorID:       dd.vendorID,
-		productID:      dd.productID,
+		bus:            dd.Bus,
+		vendorID:       dd.VendorID,
+		productID:      dd.ProductID,
 		version:        0,
 		country:        0,
-		descriptor:     dd.descriptor,
 	}
-}
 
-// defaultHandler ignores the event that it is called to handle.
-func defaultHandler(ctx context.Context, d *Device, buf []byte) error {
-	return nil
+	copy(req.descriptor[:], dd.descriptor)
+
+	return req
 }
 
 // deviceNodes assigns to device d's hidRawNodes and eventNodes fields
@@ -462,5 +446,5 @@ func deviceNodes(ctx context.Context, d *Device) error {
 // /sys/bus/hid/devices/<infoString>.<ID> where ID is a unique ID for
 // each device the kernel recognizes.
 func (d *Device) infoString() string {
-	return fmt.Sprintf("%04X:%04X:%04X", d.Data.bus, d.Data.vendorID, d.Data.productID)
+	return fmt.Sprintf("%04X:%04X:%04X", d.Data.Bus, d.Data.VendorID, d.Data.ProductID)
 }
