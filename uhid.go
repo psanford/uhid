@@ -78,6 +78,37 @@ const (
 	SetReportReply = 14
 )
 
+func (e EventType) String() string {
+	switch e {
+	case Destroy:
+		return "DestroyEventType"
+	case Start:
+		return "StartEventType"
+	case Stop:
+		return "StopEventType"
+	case Open:
+		return "OpenEventType"
+	case Close:
+		return "CloseEventType"
+	case Output:
+		return "OutputEventType"
+	case GetReport:
+		return "GetReportEventType"
+	case GetReportReply:
+		return "GetReportReplyEventType"
+	case Create2:
+		return "Create2EventType"
+	case Input2:
+		return "Input2EventType"
+	case SetReport:
+		return "SetReportEventType"
+	case SetReportReply:
+		return "SetReportReplyEventType"
+	}
+
+	return fmt.Sprintf("UnknownEventType<%d>", e)
+}
+
 // ReadStatus is returned by Dispatch to signal the multiple
 // results of reading from /dev/uhid
 type ReadStatus uint8
@@ -322,6 +353,7 @@ func (d *Device) dispatch(parentCtx context.Context) {
 	go func() {
 		for {
 			buf, err := d.readEvent()
+
 			if err != nil {
 				errChan <- err
 				return
@@ -334,27 +366,34 @@ func (d *Device) dispatch(parentCtx context.Context) {
 		}
 	}()
 
-	select {
-	case buf := <-rawDataChan:
-		reader := bytes.NewReader(buf[:4]) // We just want to read the first uint32 for now
-		var eventType uint32
-		if err := binary.Read(reader, binary.LittleEndian, &eventType); err != nil {
+	for {
+		select {
+		case buf := <-rawDataChan:
+			reader := bytes.NewReader(buf[:4]) // We just want to read the first uint32 for now
+			var eventType uint32
+			err := binary.Read(reader, binary.LittleEndian, &eventType)
+			if err != nil {
+				d.eventChan <- Event{
+					Err: fmt.Errorf("failed parsing uhid file data into request: %w", err),
+				}
+				return
+			}
 
 			d.eventChan <- Event{
-				Err: fmt.Errorf("failed parsing uhid file data into request: %w", err),
+				Type: EventType(eventType),
+				Data: buf,
+			}
+		case err := <-errChan:
+			d.eventChan <- Event{
+				Err: err,
+			}
+			return
+		case <-ctx.Done():
+			d.eventChan <- Event{
+				Err: ctx.Err(),
 			}
 			return
 		}
-
-		d.eventChan <- Event{
-			Type: EventType(eventType),
-			Data: buf,
-		}
-	case <-ctx.Done():
-		d.eventChan <- Event{
-			Err: ctx.Err(),
-		}
-		return
 	}
 }
 
