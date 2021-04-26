@@ -228,7 +228,10 @@ func (d *Device) Open(ctx context.Context) (chan Event, error) {
 
 	// Check if uniq is empty.
 	if d.Data.uniq == [64]byte{} {
-		rand.Read(d.Data.uniq[:])
+		_, err := rand.Read(d.Data.uniq[:])
+		if err != nil {
+			panic(err)
+		}
 	}
 
 	if err = d.WriteEvent(d.Data.createRequest()); err != nil {
@@ -381,7 +384,7 @@ func (d *Device) dispatch(parentCtx context.Context) {
 
 			d.eventChan <- Event{
 				Type: EventType(eventType),
-				Data: buf,
+				Data: buf[4:],
 			}
 		case err := <-errChan:
 			d.eventChan <- Event{
