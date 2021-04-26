@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"math/big"
 	"time"
 
 	"github.com/psanford/uhid"
@@ -21,6 +22,7 @@ const BusUSB = 0x03
 
 var (
 	masterPrivateKey []byte
+	signCounter      uint32
 )
 
 func main() {
@@ -192,82 +194,179 @@ func run() error {
 				continue
 			}
 
-			if req.Command == AuthenticatorRegisterCmd {
+			if req.Command == AuthenticatorAuthenticateCmd {
+				log.Printf("got AuthenticatorAuthenticateCmd req")
+				log.Printf("req: %+v", req.Authenticate)
+
+				handleAuthenticate(ctx, d, reqChanID, cmd, req)
+			} else if req.Command == AuthenticatorRegisterCmd {
 				log.Printf("got AuthenticatorRegisterCmd req")
-				func() {
-					childCtx, cancel := context.WithTimeout(ctx, 750*time.Millisecond)
-					defer cancel()
-					ok, _ := ConfirmPresence(childCtx, "FIDO Confirm")
-					if ok {
-						curve := elliptic.P256()
-
-						childPrivateKey, x, y, err := elliptic.GenerateKey(curve, rand.Reader)
-						if err != nil {
-							panic(err)
-						}
-
-						metadata := []byte("fido_wrapping_key")
-						metadata = append(metadata, req.Register.ApplicationParam[:]...)
-						h := sha256.New()
-						h.Write(metadata)
-						sum := h.Sum(nil)
-
-						aead, err := chacha20poly1305.NewX(masterPrivateKey)
-						if err != nil {
-							panic(err)
-						}
-
-						nonce := mustRand(chacha20poly1305.NonceSizeX)
-						encryptedChildPrivateKey := aead.Seal(nil, nonce, childPrivateKey, sum)
-
-						keyHandle := make([]byte, 0, len(nonce)+len(encryptedChildPrivateKey))
-						keyHandle = append(keyHandle, nonce...)
-						keyHandle = append(keyHandle, encryptedChildPrivateKey...)
-
-						if len(keyHandle) > 255 {
-							panic("keyHandle is too big")
-						}
-
-						childPubKey := elliptic.Marshal(curve, x, y)
-
-						var toSign bytes.Buffer
-						toSign.WriteByte(0)
-						toSign.Write(req.Register.ApplicationParam[:])
-						toSign.Write(req.Register.ChallengeParam[:])
-						toSign.Write(keyHandle)
-						toSign.Write(childPubKey)
-
-						sigHash := sha256.New()
-						sigHash.Write(toSign.Bytes())
-
-						sigR, sigS, err := ecdsa.Sign(rand.Reader, attestationPrivateKey, sigHash.Sum(nil))
-						if err != nil {
-							log.Fatalf("attestation sign err: %s", err)
-						}
-
-						var out bytes.Buffer
-						out.WriteByte(0x05) // reserved value
-						out.Write(childPubKey)
-						out.WriteByte(byte(len(keyHandle)))
-						out.Write(keyHandle)
-						out.Write(attestationCertDer)
-						sig := elliptic.Marshal(elliptic.P256(), sigR, sigS)
-						out.Write(sig)
-
-						err = writeRespose(d, reqChanID, cmd, out.Bytes(), swNoError)
-						if err != nil {
-							log.Printf("write register response err: %s", err)
-							return
-						}
-					} else {
-						err := writeRespose(d, reqChanID, cmd, nil, swConditionsNotSatisfied)
-						if err != nil {
-							log.Printf("Write swConditionsNotSatisfied resp err: %s", err)
-							return
-						}
-					}
-				}()
+				handleRegister(ctx, d, reqChanID, cmd, req)
 			}
+		}
+	}
+}
+
+func handleAuthenticate(ctx context.Context, d *uhid.Device, reqChanID uint32, cmd CmdType, req *AuthenticatorRequest) {
+
+	aead, err := chacha20poly1305.NewX(masterPrivateKey)
+	if err != nil {
+		panic(err)
+	}
+
+	if len(req.Authenticate.KeyHandle) < chacha20poly1305.NonceSizeX {
+		log.Fatalf("incorrect size for key handle: %d smaller than nonce)", len(req.Authenticate.KeyHandle))
+	}
+	nonce := req.Authenticate.KeyHandle[:chacha20poly1305.NonceSizeX]
+	cipherText := req.Authenticate.KeyHandle[chacha20poly1305.NonceSizeX:]
+
+	metadata := []byte("fido_wrapping_key")
+	metadata = append(metadata, req.Authenticate.ApplicationParam[:]...)
+	h := sha256.New()
+	h.Write(metadata)
+	sum := h.Sum(nil)
+
+	childPrivateKey, err := aead.Open(nil, nonce, cipherText, sum)
+	if err != nil {
+		log.Printf("decrypt key handle failed")
+		err := writeRespose(d, reqChanID, cmd, nil, swWrongData)
+		if err != nil {
+			log.Printf("send bad key handle msg err: %s", err)
+		}
+
+		return
+	}
+
+	if req.Authenticate.Ctrl == ctrlCheckOnly {
+		log.Printf("check-only success")
+		// test-of-user-presence-required: note that despite the name this signals a success condition
+		err := writeRespose(d, reqChanID, cmd, nil, swConditionsNotSatisfied)
+		if err != nil {
+			log.Printf("send bad key handle msg err: %s", err)
+		}
+		return
+	}
+
+	var userPresent uint8
+
+	if req.Authenticate.Ctrl == ctrlEnforeUserPresenceAndSign {
+		childCtx, cancel := context.WithTimeout(ctx, 750*time.Millisecond)
+		defer cancel()
+		ok, _ := ConfirmPresence(childCtx, "FIDO Confirm Authenticate")
+		if !ok {
+			err := writeRespose(d, reqChanID, cmd, nil, swConditionsNotSatisfied)
+			if err != nil {
+				log.Printf("Write swConditionsNotSatisfied resp err: %s", err)
+			}
+			return
+		} else {
+			userPresent = 0x01
+		}
+	}
+	signCounter++
+
+	var toSign bytes.Buffer
+	toSign.Write(req.Authenticate.ApplicationParam[:])
+	toSign.WriteByte(userPresent)
+	binary.Write(&toSign, binary.BigEndian, signCounter)
+	toSign.Write(req.Authenticate.ChallengeParam[:])
+
+	sigHash := sha256.New()
+	sigHash.Write(toSign.Bytes())
+
+	var ecdsaKey ecdsa.PrivateKey
+
+	ecdsaKey.D = new(big.Int).SetBytes(childPrivateKey)
+	ecdsaKey.PublicKey.Curve = elliptic.P256()
+	ecdsaKey.PublicKey.X, ecdsaKey.PublicKey.Y = ecdsaKey.PublicKey.Curve.ScalarBaseMult(ecdsaKey.D.Bytes())
+
+	sig, err := ecdsa.SignASN1(rand.Reader, &ecdsaKey, sigHash.Sum(nil))
+	if err != nil {
+		log.Fatalf("auth sign err: %s", err)
+	}
+
+	var out bytes.Buffer
+	out.WriteByte(userPresent)
+	binary.Write(&out, binary.BigEndian, signCounter)
+	out.Write(sig)
+
+	err = writeRespose(d, reqChanID, cmd, out.Bytes(), swNoError)
+	if err != nil {
+		log.Printf("write register response err: %s", err)
+		return
+	}
+}
+
+func handleRegister(ctx context.Context, d *uhid.Device, reqChanID uint32, cmd CmdType, req *AuthenticatorRequest) {
+	childCtx, cancel := context.WithTimeout(ctx, 750*time.Millisecond)
+	defer cancel()
+	ok, _ := ConfirmPresence(childCtx, "FIDO Confirm Register")
+	if ok {
+		curve := elliptic.P256()
+
+		childPrivateKey, x, y, err := elliptic.GenerateKey(curve, rand.Reader)
+		if err != nil {
+			panic(err)
+		}
+
+		metadata := []byte("fido_wrapping_key")
+		metadata = append(metadata, req.Register.ApplicationParam[:]...)
+		h := sha256.New()
+		h.Write(metadata)
+		sum := h.Sum(nil)
+
+		aead, err := chacha20poly1305.NewX(masterPrivateKey)
+		if err != nil {
+			panic(err)
+		}
+
+		nonce := mustRand(chacha20poly1305.NonceSizeX)
+		encryptedChildPrivateKey := aead.Seal(nil, nonce, childPrivateKey, sum)
+
+		keyHandle := make([]byte, 0, len(nonce)+len(encryptedChildPrivateKey))
+		keyHandle = append(keyHandle, nonce...)
+		keyHandle = append(keyHandle, encryptedChildPrivateKey...)
+
+		if len(keyHandle) > 255 {
+			panic("keyHandle is too big")
+		}
+
+		childPubKey := elliptic.Marshal(curve, x, y)
+
+		var toSign bytes.Buffer
+		toSign.WriteByte(0)
+		toSign.Write(req.Register.ApplicationParam[:])
+		toSign.Write(req.Register.ChallengeParam[:])
+		toSign.Write(keyHandle)
+		toSign.Write(childPubKey)
+
+		sigHash := sha256.New()
+		sigHash.Write(toSign.Bytes())
+
+		sigR, sigS, err := ecdsa.Sign(rand.Reader, attestationPrivateKey, sigHash.Sum(nil))
+		if err != nil {
+			log.Fatalf("attestation sign err: %s", err)
+		}
+
+		var out bytes.Buffer
+		out.WriteByte(0x05) // reserved value
+		out.Write(childPubKey)
+		out.WriteByte(byte(len(keyHandle)))
+		out.Write(keyHandle)
+		out.Write(attestationCertDer)
+		sig := elliptic.Marshal(elliptic.P256(), sigR, sigS)
+		out.Write(sig)
+
+		err = writeRespose(d, reqChanID, cmd, out.Bytes(), swNoError)
+		if err != nil {
+			log.Printf("write register response err: %s", err)
+			return
+		}
+	} else {
+		err := writeRespose(d, reqChanID, cmd, nil, swConditionsNotSatisfied)
+		if err != nil {
+			log.Printf("Write swConditionsNotSatisfied resp err: %s", err)
+			return
 		}
 	}
 }
