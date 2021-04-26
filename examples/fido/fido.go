@@ -69,7 +69,7 @@ func decodeAuthenticatorRequest(raw []byte) (*AuthenticatorRequest, error) {
 
 	if req.Command == AuthenticatorRegisterCmd {
 		var reg AuthenticatorRegisterReq
-		if len(req.Data) != len(reg.ChallengeParam)+len(reg.ApplicationParam) {
+		if len(req.Data) < len(reg.ChallengeParam)+len(reg.ApplicationParam) {
 			return nil, fmt.Errorf("register request incorrect size: %d", len(req.Data))
 		}
 
@@ -101,8 +101,8 @@ func decodeAuthenticatorRequest(raw []byte) (*AuthenticatorRequest, error) {
 		khLen := data[0]
 		data = data[1:]
 
-		if len(data) != int(khLen) {
-			return nil, fmt.Errorf("key handle len mismatch %d vs %d", len(data), int(khLen))
+		if len(data) < int(khLen) {
+			return nil, fmt.Errorf("key handle len too short %d vs %d", len(data), int(khLen))
 		}
 
 		auth.KeyHandle = data[:khLen]

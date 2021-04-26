@@ -63,6 +63,7 @@ const (
 	CmdLock  CmdType = 0x04 // Send lock channel command
 	CmdInit  CmdType = 0x06 // Channel initialization
 	CmdWink  CmdType = 0x08 // Send device identification wink
+	CmdCbor  CmdType = 0x10 // Send encapsulated CTAP CBOR
 	CmdSync  CmdType = 0x3c // Protocol resync command
 	CmdError CmdType = 0x3f // Error response
 
@@ -77,7 +78,8 @@ const (
 	deviceMajor        = 1
 	deviceMinor        = 0
 	deviceBuild        = 0
-	winkCapbility      = 0x01
+	winkCapability     = 0x01
+	cborCapability     = 0x04
 )
 
 type CmdType uint8
@@ -102,6 +104,8 @@ func (c CmdType) String() string {
 		return "CmdSync"
 	case CmdError:
 		return "CmdError"
+	case CmdCbor:
+		return "CmdCbor"
 	}
 
 	if c >= vendorSpecificFirstCmd && c <= vendorSpecificLastCmd {
@@ -203,6 +207,9 @@ func run() error {
 				log.Printf("got AuthenticatorRegisterCmd req")
 				handleRegister(ctx, d, reqChanID, cmd, req)
 			}
+		} else {
+			log.Printf("send Cmd not supported err")
+			writeRespose(d, reqChanID, cmd, nil, swInsNotSupported)
 		}
 	}
 }
@@ -434,7 +441,6 @@ func writeRespose(d *uhid.Device, chanID uint32, cmd CmdType, data []byte, statu
 			if err != nil {
 				return err
 			}
-
 			seqNo++
 		}
 	}
@@ -472,7 +478,7 @@ type frameCont struct {
 func (fi *frameCont) Marshal() []byte {
 	buf := new(bytes.Buffer)
 	binary.Write(buf, binary.BigEndian, fi.ChannelID)
-	buf.WriteByte(0x80 & fi.SeqNo)
+	buf.WriteByte(fi.SeqNo)
 	buf.Write(fi.Data)
 	if buf.Len() < contPacketDataLen {
 		pad := make([]byte, contPacketDataLen-buf.Len())
@@ -499,7 +505,7 @@ func newInitResponse(channelID uint32, nonce [8]byte) *initResponse {
 		MajorDeviceVersion: deviceMajor,
 		MinorDeviceVersion: deviceMinor,
 		BuildDeviceVersion: deviceBuild,
-		RawCapabilities:    winkCapbility,
+		// RawCapabilities:    winkCapability | cborCapability,
 	}
 }
 
