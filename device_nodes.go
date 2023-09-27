@@ -89,6 +89,9 @@ func hidrawNodes(ctx context.Context, devicePath string) ([]string, error) {
 func eventNodes(devicePath string) ([]string, error) {
 	eventNodes := make([]string, 0)
 	directories, err := ioutil.ReadDir(path.Join(devicePath, "input"))
+	if errors.Is(err, os.ErrNotExist) {
+		return nil, nil
+	}
 	if err != nil {
 		return nil, err
 	}
